@@ -1,13 +1,11 @@
 # DECISIONS.md
 
-**Concurrency.** Races are closed in the database, not in Python. `(emp_code, date)` is a unique index, so simultaneous punch-ins yield one 201 and 409s. Punch-out uses `find_one_and_update` with `punch_out: null` in the filter (compare-and-set). PATCH reads, validates, then updates only if status/punch times/history length are unchanged, retrying up to 5 times before 409, so no history entry is lost.
+**1. Indexes:** I created a unique `emp_code` index to prevent duplicate employees and a unique `(emp_code, date)` index to guarantee one attendance record per employee per day. The `(date, emp_code)` index supports sorted attendance queries, while `(status, date, emp_code)` supports status filtering. The `(emp_code, punch_in)` index helps find punch-out records. Employee indexes on `(department, joined_on)` and `joined_on` support department and joining-date queries. I avoided a separate `status` index because the compound index already starts with that field.
 
-**Derived fields are stored.** Late/overtime/work hours/half day are computed once at write time (rules in one function, `derive_fields`) and analytics read the stored values, as the contract requires.
+**2. Punch-in race:** Two identical requests can both pass the employee lookup, but the unique `(emp_code, date)` index allows only one attendance insertion. Our concurrency test returned one `201 Created` and one `409 Conflict`.
 
-**Exact rounding.** Mongo's `$round` is half-even, so I avoid it for reported numbers. Averages are summed as integer cents and rounded half-up in Decimal; trend rates are integer units of 1e-4 using `floor((2N+D)/(2D))`. The moving average averages the *rounded* daily rates (my reading of "attendance_rate values").
+**3. Ties:** The leaderboard uses `$rank`, so employees with equal late minutes share the same rank. The limit is applied after ranking, so employees tied at the cutoff are included.
 
-**Trend pipeline.** Gap filling uses `$densify`; headcount is a running `$setWindowFields` sum of "joined" events, so no Python loop over days. Two `$unionWith` marker rows guarantee both range ends exist even with zero logs.
+**4. Headcount:** The department summary uses `$unionWith` to combine attendance totals with employee counts. Employees with no attendance logs are therefore still included in department headcount.
 
-**Indexes.** `(emp_code,date)` unique; `(date -1,emp_code)` and `(status,date -1,emp_code)` serve the sorted list and month scans; `(emp_code,punch_in -1)` serves punch-out; employees get `(department,joined_on)`.
-
-**Unverified.** I could not run MongoDB where this was written; pipelines should be checked with `/admin/explain` on a real dataset.
+**5. Scaling:** For 100 times more data, I would inspect execution statistics, benchmark aggregation pipelines, and consider precomputed summaries for expensive analytics.
